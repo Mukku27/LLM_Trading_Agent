@@ -37,14 +37,24 @@ def process_trades(history):
                 entry_time = datetime.fromisoformat(entry_record['timestamp'])
                 exit_time = datetime.fromisoformat(record['timestamp'])
                 
+                entry_price = entry_record['price']
+                exit_price = record['price']
+                position_size = entry_record['position_size']
+
+                if direction == "LONG":
+                    pnl_dollars = (exit_price - entry_price) * position_size
+                else:  # SHORT
+                    pnl_dollars = (entry_price - exit_price) * position_size
+
                 trades.append({
                     "Entry Time": entry_time,
                     "Exit Time": exit_time,
                     "Direction": direction,
-                    "Entry Price": entry_record['price'],
-                    "Exit Price": record['price'],
-                    "Position Size": entry_record['position_size'],
+                    "Entry Price": entry_price,
+                    "Exit Price": exit_price,
+                    "Position Size": position_size,
                     "P&L (%)": record.get('pnl', 0),
+                    "P&L ($)": pnl_dollars,
                     "Holding Period": exit_time - entry_time,
                 })
     return trades
@@ -65,19 +75,31 @@ else:
         st.header("Key Performance Metrics")
         
         total_trades = len(df)
-        winning_trades = df[df['P&L (%)'] > 0]
-        losing_trades = df[df['P&L (%)'] < 0]
+        winning_trades = df[df['P&L ($)'] > 0]
+        losing_trades = df[df['P&L ($)'] < 0]
         
         win_rate = (len(winning_trades) / total_trades) * 100 if total_trades > 0 else 0
-        total_pnl = df['P&L (%)'].sum()
-        avg_pnl = df['P&L (%)'].mean()
+        
+        total_pnl_percent = df['P&L (%)'].sum()
         avg_holding_period = df['Holding Period'].mean()
+
+        gross_profit_dollars = df[df['P&L ($)'] > 0]['P&L ($)'].sum()
+        gross_loss_dollars = df[df['P&L ($)'] < 0]['P&L ($)'].sum()
+        net_pnl_dollars = df['P&L ($)'].sum()
 
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Total Trades", total_trades)
         col2.metric("Win Rate", f"{win_rate:.2f}%")
-        col3.metric("Total P&L", f"{total_pnl:.2f}%")
+        col3.metric("Total P&L (%)", f"{total_pnl_percent:.2f}%")
         col4.metric("Avg. Holding Period", str(avg_holding_period).split('.')[0])
+
+        st.markdown("---")
+        
+        col5, col6, col7 = st.columns(3)
+        col5.metric("Net P&L ($)", f"${net_pnl_dollars:,.2f}")
+        col6.metric("Gross Profit ($)", f"${gross_profit_dollars:,.2f}")
+        col7.metric("Gross Loss ($)", f"${gross_loss_dollars:,.2f}")
+
 
         # --- Charts ---
         st.header("Performance Charts")
@@ -86,14 +108,21 @@ else:
         df_sorted = df.sort_values(by="Exit Time").reset_index(drop=True)
         df_sorted['Cumulative P&L'] = df_sorted['P&L (%)'].cumsum()
         
-        st.subheader("Cumulative P&L Over Time")
+        st.subheader("Cumulative P&L (%) Over Time")
         st.line_chart(df_sorted, x="Exit Time", y="Cumulative P&L")
+
+        df_sorted['Cumulative P&L ($)'] = df_sorted['P&L ($)'].cumsum()
+        st.subheader("Cumulative P&L ($) Over Time")
+        st.line_chart(df_sorted, x="Exit Time", y="Cumulative P&L ($)")
         
         # P&L per Trade
-        st.subheader("P&L per Trade")
+        st.subheader("P&L (%) per Trade")
         st.bar_chart(df_sorted['P&L (%)'])
+
+        st.subheader("P&L ($) per Trade")
+        st.bar_chart(df_sorted['P&L ($)'])
 
         # --- Trade Log ---
         st.header("Detailed Trade Log")
-        st.dataframe(df_sorted[['Entry Time', 'Exit Time', 'Direction', 'Entry Price', 'Exit Price', 'P&L (%)', 'Holding Period']])
+        st.dataframe(df_sorted[['Entry Time', 'Exit Time', 'Direction', 'Position Size', 'Entry Price', 'Exit Price', 'P&L (%)', 'P&L ($)', 'Holding Period']])
 
