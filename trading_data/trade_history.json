@@ -71,5 +71,58 @@
         "take_profit": 433.4,
         "position_size": 0.02,
         "reasoning": "Opened new LONG position"
+    },
+    {
+        "timestamp": "2025-07-17T15:13:48.273598",
+        "action": "CLOSE_LONG",
+        "price": 432.7,
+        "confidence": "MEDIUM",
+        "stop_loss": 429.3,
+        "take_profit": 433.4,
+        "position_size": 0.02,
+        "reasoning": "Position closed: analysis_signal",
+        "pnl": 0.005097312326227831
+    },
+    {
+        "timestamp": "2025-07-17T15:15:12.551441",
+        "action": "SELL",
+        "price": 433.3,
+        "confidence": "MEDIUM",
+        "stop_loss": 433.5,
+        "take_profit": 431.1,
+        "position_size": 0.02,
+        "reasoning": "Opened new SHORT position"
+    },
+    {
+        "timestamp": "2025-07-17T15:18:01.374391",
+        "action": "CLOSE_SHORT",
+        "price": 433.6,
+        "confidence": "MEDIUM",
+        "stop_loss": 433.5,
+        "take_profit": 431.1,
+        "position_size": 0.02,
+        "reasoning": "Position closed: stop_loss",
+        "pnl": -0.0013847219016847974
+    },
+    {
+        "timestamp": "2025-07-17T15:19:37.479753",
+        "action": "SELL",
+        "price": 433.6,
+        "confidence": "MEDIUM",
+        "stop_loss": 434.5,
+        "take_profit": 431.9,
+        "position_size": 0.015,
+        "reasoning": "Opened new SHORT position"
+    },
+    {
+        "timestamp": "2025-07-17T15:20:01.593787",
+        "action": "CLOSE_SHORT",
+        "price": 434.5,
+        "confidence": "MEDIUM",
+        "stop_loss": 434.5,
+        "take_profit": 431.9,
+        "position_size": 0.015,
+        "reasoning": "Position closed: stop_loss",
+        "pnl": -0.0031134686346862683
     }
 ]
