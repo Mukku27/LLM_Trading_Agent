@@ -49,5 +49,3 @@ config/model_config.ini
 .DS_Store
 Thumbs.db
 
-# Ignore JSON files
-*.json
