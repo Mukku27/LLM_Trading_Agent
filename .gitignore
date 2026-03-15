@@ -39,6 +39,12 @@ logs/
 # Configuration files with sensitive data
 config/model_config.ini
 
+# SQLite databases
+trading_data/*.db
+
+# Audit logs
+trading_data/audit_log.jsonl
+
 # IDE
 .idea/
 .vscode/
