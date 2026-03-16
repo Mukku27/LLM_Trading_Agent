@@ -1,4 +1,6 @@
+import asyncio
 import configparser
+import functools
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, date
@@ -69,7 +71,7 @@ class RiskManager:
     # Public API
     # ------------------------------------------------------------------
 
-    def validate(self, order: OrderRequest, portfolio_equity: float, open_position_count: int) -> RiskCheckResult:
+    def validate(self, order: OrderRequest, portfolio_equity: float, open_position_count: int, *, is_closing: bool = False) -> RiskCheckResult:
         """Run the full pre-trade validation checklist."""
         self._rotate_daily_stats()
 
@@ -88,7 +90,7 @@ class RiskManager:
                     f"Position size {position_pct:.1f}% exceeds max {self.max_position_pct}%",
                 )
 
-        if open_position_count >= self.max_open_positions:
+        if not is_closing and open_position_count >= self.max_open_positions:
             return RiskCheckResult(
                 False,
                 f"Max open positions ({self.max_open_positions}) reached",
@@ -102,21 +104,22 @@ class RiskManager:
                     f"Daily loss {daily_loss_pct:.1f}% exceeds max {self.max_daily_loss_pct}%",
                 )
 
-        last_trade = self._last_trade_time.get(order.symbol, 0)
-        elapsed = time.time() - last_trade
-        if elapsed < self.cooldown_seconds:
-            remaining = self.cooldown_seconds - int(elapsed)
-            return RiskCheckResult(False, f"Cooldown active for {order.symbol}: {remaining}s remaining")
+        if not is_closing:
+            last_trade = self._last_trade_time.get(order.symbol, 0)
+            elapsed = time.time() - last_trade
+            if elapsed < self.cooldown_seconds:
+                remaining = self.cooldown_seconds - int(elapsed)
+                return RiskCheckResult(False, f"Cooldown active for {order.symbol}: {remaining}s remaining")
 
-        self._prune_rate_window()
-        if len(self._recent_order_timestamps) >= self.max_orders_per_minute:
-            return RiskCheckResult(False, f"Rate limit: {self.max_orders_per_minute} orders/min exceeded")
+            self._prune_rate_window()
+            if len(self._recent_order_timestamps) >= self.max_orders_per_minute:
+                return RiskCheckResult(False, f"Rate limit: {self.max_orders_per_minute} orders/min exceeded")
 
         return RiskCheckResult(True)
 
-    async def execute(self, order: OrderRequest, portfolio_equity: float, open_position_count: int) -> Optional[OrderResult]:
+    async def execute(self, order: OrderRequest, portfolio_equity: float, open_position_count: int, *, is_closing: bool = False) -> Optional[OrderResult]:
         """Validate then route to the execution engine."""
-        check = self.validate(order, portfolio_equity, open_position_count)
+        check = self.validate(order, portfolio_equity, open_position_count, is_closing=is_closing)
 
         if not check.approved:
             self.logger.warning(f"[Risk] Order REJECTED: {check.reason}")
@@ -126,8 +129,11 @@ class RiskManager:
             self.logger.info(
                 f"[Risk] Confirmation required: {order.side} {order.amount} {order.symbol} @ {order.price}"
             )
-            confirmation = input("Confirm trade? (yes/no): ").strip().lower()
-            if confirmation != "yes":
+            loop = asyncio.get_running_loop()
+            confirmation = await loop.run_in_executor(
+                None, functools.partial(input, "Confirm trade? (yes/no): ")
+            )
+            if confirmation.strip().lower() != "yes":
                 self.logger.info("[Risk] Trade rejected by user")
                 return None
 

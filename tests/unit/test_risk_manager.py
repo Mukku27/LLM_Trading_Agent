@@ -65,6 +65,11 @@ class TestMaxOpenPositions:
         assert not result.approved
         assert "Max open positions" in result.reason
 
+    def test_allows_close_when_at_limit(self, risk):
+        order = OrderRequest(symbol="BTC/USDC", side="sell", order_type="market", amount=0.01, price=50000)
+        result = risk.validate(order, portfolio_equity=10000, open_position_count=3, is_closing=True)
+        assert result.approved
+
 
 class TestDailyLoss:
     def test_rejects_after_daily_loss_exceeded(self, risk):
@@ -85,6 +90,14 @@ class TestCooldown:
         assert not result.approved
         assert "Cooldown" in result.reason
 
+    def test_allows_close_during_cooldown(self, base_config, engine, mock_logger):
+        base_config.set("execution", "cooldown_seconds", "5")
+        risk = RiskManager(engine, base_config, mock_logger)
+        risk._last_trade_time["BTC/USDC"] = time.time()
+        order = OrderRequest(symbol="BTC/USDC", side="sell", order_type="market", amount=0.01, price=50000)
+        result = risk.validate(order, portfolio_equity=10000, open_position_count=1, is_closing=True)
+        assert result.approved
+
 
 class TestRateLimit:
     def test_rejects_when_rate_exceeded(self, base_config, engine, mock_logger):
@@ -96,3 +109,12 @@ class TestRateLimit:
         result = risk.validate(order, portfolio_equity=10000, open_position_count=0)
         assert not result.approved
         assert "Rate limit" in result.reason
+
+    def test_allows_close_when_rate_exceeded(self, base_config, engine, mock_logger):
+        base_config.set("execution", "max_orders_per_minute", "2")
+        risk = RiskManager(engine, base_config, mock_logger)
+        now = time.time()
+        risk._recent_order_timestamps = [now - 5, now - 3]
+        order = OrderRequest(symbol="BTC/USDC", side="sell", order_type="market", amount=0.01, price=50000)
+        result = risk.validate(order, portfolio_equity=10000, open_position_count=1, is_closing=True)
+        assert result.approved
