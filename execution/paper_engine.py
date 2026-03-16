@@ -1,8 +1,9 @@
 import configparser
 import uuid
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
+from core.data_persistence import DataPersistence
 from execution.base import ExecutionEngine
 from execution.connectors.base import ExchangeConnector
 from utils.dataclass import (
@@ -27,7 +28,9 @@ class PaperEngine(ExecutionEngine):
         self.connector = connector
         self.config = config
         self.logger = logger
-        self._simulated_balance: dict = {"USDC": 10_000.0}
+        self.data_persistence = DataPersistence(logger=logger)
+        self._simulated_equity = config.getfloat("execution", "simulated_equity", fallback=10_000.0)
+        self._simulated_balance: dict = {"USDC": self._simulated_equity}
         self._open_orders: List[dict] = []
 
     async def place_order(self, order: OrderRequest) -> OrderResult:
@@ -60,7 +63,10 @@ class PaperEngine(ExecutionEngine):
                 raw_response=raw,
             )
         except Exception as e:
-            self.logger.warning(f"[Paper] Testnet order failed ({e}), using simulated fill")
+            self.logger.warning(
+                f"[Paper] Testnet order failed ({e}), using simulated fill. "
+                f"Review the error to rule out config/balance issues."
+            )
             return OrderResult(
                 order_id=client_id,
                 status=OrderStatus.FILLED.value,
@@ -68,12 +74,15 @@ class PaperEngine(ExecutionEngine):
                 avg_price=order.price or 0.0,
                 fee=0.0,
                 timestamp=datetime.now(),
-                raw_response={"mode": "paper_simulated", "error": str(e)},
+                raw_response={
+                    "mode": "paper_simulated",
+                    "simulated": True,
+                    "error": str(e),
+                },
             )
 
-    async def cancel_order(self, order_id: str) -> bool:
+    async def cancel_order(self, order_id: str, symbol: str) -> bool:
         try:
-            symbol = self.config.get("exchange", "symbol")
             await self.connector.cancel_order(order_id, symbol)
             return True
         except Exception as e:
@@ -97,16 +106,14 @@ class PaperEngine(ExecutionEngine):
                 timestamp=datetime.now(),
             )
 
-    async def get_open_orders(self) -> List[dict]:
+    async def get_open_orders(self, symbol: Optional[str] = None) -> List[dict]:
         try:
-            symbol = self.config.get("exchange", "symbol")
             return await self.connector.fetch_open_orders(symbol)
         except Exception:
             return []
 
-    async def get_order_status(self, order_id: str) -> OrderStatus:
+    async def get_order_status(self, order_id: str, symbol: str) -> OrderStatus:
         try:
-            symbol = self.config.get("exchange", "symbol")
             raw = await self.connector.fetch_order(order_id, symbol)
             status_map = {
                 "closed": OrderStatus.FILLED,
@@ -122,11 +129,13 @@ class PaperEngine(ExecutionEngine):
     async def sync_portfolio(self) -> Portfolio:
         balance = await self.get_balance()
         total_equity = sum(balance.total.values())
+        position = self.data_persistence.load_position()
+        positions = [position] if position else []
         return Portfolio(
             balances=balance,
-            open_positions=[],
+            open_positions=positions,
             unrealized_pnl=0.0,
-            total_equity=max(total_equity, 10_000.0),
+            total_equity=max(total_equity, self._simulated_equity),
         )
 
     async def close(self) -> None:

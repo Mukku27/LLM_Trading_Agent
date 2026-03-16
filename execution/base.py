@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 
 from utils.dataclass import OrderRequest, OrderResult, AccountBalance, Portfolio, OrderStatus
 
@@ -12,7 +12,7 @@ class ExecutionEngine(ABC):
         ...
 
     @abstractmethod
-    async def cancel_order(self, order_id: str) -> bool:
+    async def cancel_order(self, order_id: str, symbol: str) -> bool:
         ...
 
     @abstractmethod
@@ -20,11 +20,11 @@ class ExecutionEngine(ABC):
         ...
 
     @abstractmethod
-    async def get_open_orders(self) -> List[dict]:
+    async def get_open_orders(self, symbol: Optional[str] = None) -> List[dict]:
         ...
 
     @abstractmethod
-    async def get_order_status(self, order_id: str) -> OrderStatus:
+    async def get_order_status(self, order_id: str, symbol: str) -> OrderStatus:
         ...
 
     @abstractmethod

@@ -24,23 +24,23 @@ async def test_place_order_returns_filled(engine):
 
 @pytest.mark.asyncio
 async def test_cancel_order_always_succeeds(engine):
-    assert await engine.cancel_order("fake-id") is True
+    assert await engine.cancel_order("fake-id", "BTC/USDC") is True
 
 
 @pytest.mark.asyncio
 async def test_get_balance_returns_simulated(engine):
     balance = await engine.get_balance()
-    assert balance.total["USDC"] == DryRunEngine.SIMULATED_EQUITY
+    assert balance.total["USDC"] == DryRunEngine.DEFAULT_SIMULATED_EQUITY
 
 
 @pytest.mark.asyncio
 async def test_sync_portfolio(engine):
     portfolio = await engine.sync_portfolio()
-    assert portfolio.total_equity == DryRunEngine.SIMULATED_EQUITY
+    assert portfolio.total_equity == DryRunEngine.DEFAULT_SIMULATED_EQUITY
     assert portfolio.unrealized_pnl == 0.0
 
 
 @pytest.mark.asyncio
 async def test_get_order_status_always_filled(engine):
-    status = await engine.get_order_status("any")
+    status = await engine.get_order_status("any", "BTC/USDC")
     assert status == OrderStatus.FILLED

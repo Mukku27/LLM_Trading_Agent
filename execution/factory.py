@@ -1,26 +1,11 @@
 import configparser
 
 from execution.base import ExecutionEngine
+from execution.connectors.ccxt_connector import CCXTConnector
+from execution.credentials import CredentialManager
 from execution.dry_run_engine import DryRunEngine
 from execution.live_engine import LiveEngine
 from execution.paper_engine import PaperEngine
-from execution.connectors.binance import BinanceConnector
-from execution.connectors.coinbase import CoinbaseConnector
-
-
-def _create_connector(exchange_name: str, sandbox: bool = False):
-    """Instantiate the appropriate ExchangeConnector."""
-    connectors = {
-        "binance": lambda: BinanceConnector(sandbox=sandbox),
-        "coinbase": lambda: CoinbaseConnector(sandbox=sandbox),
-    }
-    factory_fn = connectors.get(exchange_name.lower())
-    if factory_fn is None:
-        raise ValueError(
-            f"Unsupported exchange: {exchange_name}. "
-            f"Available: {list(connectors.keys())}"
-        )
-    return factory_fn()
 
 
 def create_execution_engine(
@@ -31,19 +16,33 @@ def create_execution_engine(
     mode = config.get("execution", "mode", fallback="dry_run")
     exchange_name = config.get("execution", "exchange", fallback="binance")
 
+    _VALID_MODES = {"dry_run", "paper", "live"}
+    if mode not in _VALID_MODES:
+        raise ValueError(f"Unknown execution mode: {mode}")
+
     if mode == "dry_run":
         logger.info("Execution mode: dry_run")
         return DryRunEngine(config, logger)
 
-    elif mode == "paper":
+    creds = CredentialManager(logger)
+    has_creds = creds.load(exchange_name=exchange_name)
+
+    if mode == "paper":
+        if not has_creds:
+            logger.warning(
+                "No exchange credentials found for paper mode. "
+                "PaperEngine will use simulated fills for all orders."
+            )
         logger.info(f"Execution mode: paper (sandbox) on {exchange_name}")
-        connector = _create_connector(exchange_name, sandbox=True)
+        connector = CCXTConnector(exchange_name, sandbox=True)
         return PaperEngine(connector, config, logger)
 
-    elif mode == "live":
-        logger.info(f"Execution mode: LIVE on {exchange_name}")
-        connector = _create_connector(exchange_name, sandbox=False)
-        return LiveEngine(connector, config, logger)
+    if not has_creds:
+        raise RuntimeError(
+            f"Execution mode '{mode}' requires exchange credentials. "
+            f"Set EXCHANGE_API_KEY and EXCHANGE_API_SECRET in your .env file."
+        )
 
-    else:
-        raise ValueError(f"Unknown execution mode: {mode}")
+    logger.info(f"Execution mode: LIVE on {exchange_name}")
+    connector = CCXTConnector(exchange_name, sandbox=False)
+    return LiveEngine(connector, config, logger)

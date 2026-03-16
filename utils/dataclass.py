@@ -33,13 +33,19 @@ class OrderStatus(str, Enum):
 @dataclass
 class OrderRequest:
     symbol: str
-    side: str
-    order_type: str
+    side: OrderSide
+    order_type: OrderType
     amount: float
     price: Optional[float] = None
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     client_order_id: Optional[str] = None
+
+    def __post_init__(self):
+        if not isinstance(self.side, OrderSide):
+            self.side = OrderSide(self.side)
+        if not isinstance(self.order_type, OrderType):
+            self.order_type = OrderType(self.order_type)
 
 
 @dataclass

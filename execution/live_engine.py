@@ -1,8 +1,9 @@
 import configparser
 import uuid
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
+from core.data_persistence import DataPersistence
 from execution.base import ExecutionEngine
 from execution.connectors.base import ExchangeConnector
 from utils.dataclass import (
@@ -22,6 +23,7 @@ class LiveEngine(ExecutionEngine):
         self.connector = connector
         self.config = config
         self.logger = logger
+        self.data_persistence = DataPersistence(logger=logger)
 
     async def place_order(self, order: OrderRequest) -> OrderResult:
         client_id = order.client_order_id or str(uuid.uuid4())
@@ -68,9 +70,8 @@ class LiveEngine(ExecutionEngine):
                 raw_response={"error": str(e)},
             )
 
-    async def cancel_order(self, order_id: str) -> bool:
+    async def cancel_order(self, order_id: str, symbol: str) -> bool:
         try:
-            symbol = self.config.get("exchange", "symbol")
             await self.connector.cancel_order(order_id, symbol)
             self.logger.info(f"[Live] Cancelled order {order_id}")
             return True
@@ -87,12 +88,10 @@ class LiveEngine(ExecutionEngine):
             timestamp=datetime.now(),
         )
 
-    async def get_open_orders(self) -> List[dict]:
-        symbol = self.config.get("exchange", "symbol")
+    async def get_open_orders(self, symbol: Optional[str] = None) -> List[dict]:
         return await self.connector.fetch_open_orders(symbol)
 
-    async def get_order_status(self, order_id: str) -> OrderStatus:
-        symbol = self.config.get("exchange", "symbol")
+    async def get_order_status(self, order_id: str, symbol: str) -> OrderStatus:
         raw = await self.connector.fetch_order(order_id, symbol)
         status_map = {
             "closed": OrderStatus.FILLED,
@@ -106,9 +105,11 @@ class LiveEngine(ExecutionEngine):
     async def sync_portfolio(self) -> Portfolio:
         balance = await self.get_balance()
         total_equity = sum(balance.total.values())
+        position = self.data_persistence.load_position()
+        positions = [position] if position else []
         return Portfolio(
             balances=balance,
-            open_positions=[],
+            open_positions=positions,
             unrealized_pnl=0.0,
             total_equity=total_equity,
         )

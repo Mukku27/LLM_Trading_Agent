@@ -8,7 +8,8 @@ class CredentialManager:
     API keys should be loaded from .env via python-dotenv at application startup.
     """
 
-    REQUIRED_ENVS = ("EXCHANGE_API_KEY", "EXCHANGE_API_SECRET")
+    _BASE_REQUIRED = ("EXCHANGE_API_KEY", "EXCHANGE_API_SECRET")
+    _PASSPHRASE_EXCHANGES = frozenset({"coinbase"})
 
     def __init__(self, logger) -> None:
         self.logger = logger
@@ -16,12 +17,16 @@ class CredentialManager:
         self._api_secret: Optional[str] = None
         self._passphrase: Optional[str] = None
 
-    def load(self) -> bool:
+    def load(self, exchange_name: Optional[str] = None) -> bool:
         self._api_key = os.environ.get("EXCHANGE_API_KEY")
         self._api_secret = os.environ.get("EXCHANGE_API_SECRET")
         self._passphrase = os.environ.get("EXCHANGE_API_PASSPHRASE")
 
-        missing = [k for k in self.REQUIRED_ENVS if not os.environ.get(k)]
+        required = list(self._BASE_REQUIRED)
+        if exchange_name and exchange_name.lower() in self._PASSPHRASE_EXCHANGES:
+            required.append("EXCHANGE_API_PASSPHRASE")
+
+        missing = [k for k in required if not os.environ.get(k)]
         if missing:
             self.logger.warning(
                 f"[Credentials] Missing env vars: {missing}. "

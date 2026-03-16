@@ -1,7 +1,7 @@
 import configparser
 import uuid
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 from core.data_persistence import DataPersistence
 from execution.base import ExecutionEngine
@@ -16,13 +16,16 @@ class DryRunEngine(ExecutionEngine):
     Produces identical behavior to the original system — no exchange calls.
     """
 
-    SIMULATED_EQUITY = 10_000.0
+    DEFAULT_SIMULATED_EQUITY = 10_000.0
 
     def __init__(self, config: configparser.ConfigParser, logger) -> None:
         self.config = config
         self.logger = logger
         self.data_persistence = DataPersistence(logger=logger)
         self._open_orders: List[dict] = []
+        self._simulated_equity: float = config.getfloat(
+            "execution", "simulated_equity", fallback=self.DEFAULT_SIMULATED_EQUITY
+        )
 
     async def place_order(self, order: OrderRequest) -> OrderResult:
         order_id = str(uuid.uuid4())
@@ -43,23 +46,23 @@ class DryRunEngine(ExecutionEngine):
         )
         return result
 
-    async def cancel_order(self, order_id: str) -> bool:
+    async def cancel_order(self, order_id: str, symbol: str = "") -> bool:
         self.logger.info(f"[DryRun] Cancel order {order_id} (simulated)")
         self._open_orders = [o for o in self._open_orders if o.get("id") != order_id]
         return True
 
     async def get_balance(self) -> AccountBalance:
         return AccountBalance(
-            total={"USDC": self.SIMULATED_EQUITY},
-            free={"USDC": self.SIMULATED_EQUITY},
+            total={"USDC": self._simulated_equity},
+            free={"USDC": self._simulated_equity},
             used={"USDC": 0.0},
             timestamp=datetime.now(),
         )
 
-    async def get_open_orders(self) -> List[dict]:
+    async def get_open_orders(self, symbol: Optional[str] = None) -> List[dict]:
         return list(self._open_orders)
 
-    async def get_order_status(self, order_id: str) -> OrderStatus:
+    async def get_order_status(self, order_id: str, symbol: str = "") -> OrderStatus:
         return OrderStatus.FILLED
 
     async def sync_portfolio(self) -> Portfolio:
@@ -71,7 +74,7 @@ class DryRunEngine(ExecutionEngine):
             balances=balance,
             open_positions=positions,
             unrealized_pnl=0.0,
-            total_equity=self.SIMULATED_EQUITY,
+            total_equity=self._simulated_equity,
         )
 
     async def close(self) -> None:
