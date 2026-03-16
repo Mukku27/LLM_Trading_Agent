@@ -1,6 +1,6 @@
 import json
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple
 
 from core.market_analyzer import MarketAnalyzer
 from execution.audit import AuditLog
@@ -46,6 +46,9 @@ class TradingStrategy:
             if hasattr(self.analyzer, "config") else "dry_run"
         )
 
+        self._failed_close_at: Optional[datetime] = None
+        self._close_retry_backoff_seconds: int = 30
+
     # --- Delegate attributes to the composed analyzer for backward compatibility ---
 
     @property
@@ -81,11 +84,93 @@ class TradingStrategy:
     async def analyze_trend(self, market_data):
         return await self.analyzer.analyze_trend(market_data)
 
+    # --- Shared execution pipeline ---
+
+    async def _execute_order(
+        self,
+        side: str,
+        amount: float,
+        price: float,
+        event_prefix: str,
+        stop_loss: Optional[float] = None,
+        take_profit: Optional[float] = None,
+    ) -> Tuple[bool, Optional[float], Optional[str]]:
+        """
+        Route an order through RiskManager -> ExecutionEngine -> OrderTracker -> AuditLog.
+        Returns (success, fill_price, order_id).  If the execution pipeline is not
+        configured, returns (True, price, None) so that the legacy JSON path always runs.
+
+        Does NOT emit the ``_filled`` audit entry — callers are responsible for that
+        so they can attach context-specific data (e.g. PnL on close).
+        """
+        if not (self.execution_engine and self.risk_manager):
+            return True, price, None
+
+        order_req = OrderRequest(
+            symbol=self.symbol,
+            side=side,
+            order_type="market",
+            amount=amount,
+            price=price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+        )
+        portfolio = await self.execution_engine.sync_portfolio()
+        open_count = len(portfolio.open_positions)
+
+        is_closing = event_prefix == "close"
+        result = await self.risk_manager.execute(order_req, portfolio.total_equity, open_count, is_closing=is_closing)
+
+        if result is None:
+            self.audit_log.record(
+                event_type=f"{event_prefix}_rejected", mode=self._execution_mode,
+                symbol=self.symbol, side=side, amount=amount,
+                price=price, risk_result="rejected",
+            )
+            return False, None, None
+
+        self.order_tracker.record_order(
+            order_id=result.order_id, symbol=self.symbol, side=side,
+            order_type="market", amount=amount, price=price,
+            status=result.status, filled_amount=result.filled_amount,
+            avg_price=result.avg_price, fee=result.fee,
+            raw_response=json.dumps(result.raw_response),
+        )
+
+        if result.status != OrderStatus.FILLED.value:
+            final_status = await self.order_tracker.poll_order(
+                result.order_id, self.execution_engine, symbol=self.symbol
+            )
+            if final_status != OrderStatus.FILLED.value:
+                self.logger.warning(
+                    f"Order {result.order_id} ended as {final_status}, "
+                    f"skipping {event_prefix}"
+                )
+                self.audit_log.record(
+                    event_type=f"{event_prefix}_unfilled", mode=self._execution_mode,
+                    symbol=self.symbol, side=side, amount=amount,
+                    price=price, order_id=result.order_id, status=final_status,
+                )
+                return False, None, None
+
+        fill_price = result.avg_price if result.avg_price > 0 else price
+        return True, fill_price, result.order_id
+
     # --- Position management ---
 
     async def check_position(self, current_price: float) -> None:
         if not self.current_position:
             return
+
+        if self._failed_close_at:
+            elapsed = (datetime.now() - self._failed_close_at).total_seconds()
+            if elapsed < self._close_retry_backoff_seconds:
+                self.logger.debug(
+                    f"Skipping close retry, backoff active for "
+                    f"{self._close_retry_backoff_seconds - int(elapsed)}s more"
+                )
+                return
+            self._failed_close_at = None
 
         if self.current_position.direction == 'LONG':
             if current_price <= self.current_position.stop_loss:
@@ -108,51 +193,20 @@ class TradingStrategy:
         direction = self.current_position.direction
         side = "sell" if direction == "LONG" else "buy"
 
-        # --- Route through execution pipeline if available ---
-        if self.execution_engine and self.risk_manager:
-            order_req = OrderRequest(
-                symbol=self.symbol,
-                side=side,
-                order_type="market",
-                amount=position_size,
-                price=current_price,
+        success, fill_price, order_id = await self._execute_order(
+            side=side, amount=position_size, price=current_price,
+            event_prefix="close",
+        )
+        if not success:
+            self._failed_close_at = datetime.now()
+            self.logger.warning(
+                f"Failed to execute close for {direction} position ({reason}), "
+                f"will retry after {self._close_retry_backoff_seconds}s backoff"
             )
-            portfolio = await self.execution_engine.sync_portfolio()
-            open_count = len(portfolio.open_positions)
+            return
 
-            result = await self.risk_manager.execute(order_req, portfolio.total_equity, open_count)
-
-            if result is None:
-                self.audit_log.record(
-                    event_type="close_rejected", mode=self._execution_mode,
-                    symbol=self.symbol, side=side, amount=position_size,
-                    price=current_price, risk_result="rejected",
-                )
-                return
-
-            self.order_tracker.record_order(
-                order_id=result.order_id, symbol=self.symbol, side=side,
-                order_type="market", amount=position_size, price=current_price,
-                status=result.status, filled_amount=result.filled_amount,
-                avg_price=result.avg_price, fee=result.fee,
-                raw_response=json.dumps(result.raw_response),
-            )
-
-            if result.status != OrderStatus.FILLED.value:
-                final_status = await self.order_tracker.poll_order(
-                    result.order_id, self.execution_engine
-                )
-                if final_status != OrderStatus.FILLED.value:
-                    self.logger.warning(f"Order {result.order_id} ended as {final_status}, skipping position close")
-                    self.audit_log.record(
-                        event_type="close_unfilled", mode=self._execution_mode,
-                        symbol=self.symbol, side=side, amount=position_size,
-                        price=current_price, order_id=result.order_id, status=final_status,
-                    )
-                    return
-
-            fill_price = result.avg_price if result.avg_price > 0 else current_price
-
+        pnl: Optional[float] = None
+        if self.risk_manager and fill_price is not None:
             entry_price = self.current_position.entry_price
             if direction == "LONG":
                 pnl = (fill_price - entry_price) * position_size
@@ -160,14 +214,14 @@ class TradingStrategy:
                 pnl = (entry_price - fill_price) * position_size
             self.risk_manager.record_pnl(pnl)
 
+        if order_id is not None:
             self.audit_log.record(
                 event_type="close_filled", mode=self._execution_mode,
                 symbol=self.symbol, side=side, amount=position_size,
-                price=fill_price, order_id=result.order_id,
-                status=result.status, pnl=pnl,
+                price=fill_price, order_id=order_id,
+                status=OrderStatus.FILLED.value, pnl=pnl,
             )
 
-        # --- Always persist via the original JSON pathway ---
         decision = TradeDecision(
             timestamp=datetime.now(),
             action=f"CLOSE_{direction}",
@@ -185,6 +239,7 @@ class TradingStrategy:
         self.data_persistence.save_trade_decision(decision)
         self.data_persistence.save_position(None)
         self.current_position = None
+        self._failed_close_at = None
 
     def _should_close_position(self, signal: str) -> bool:
         return self.current_position and signal == "CLOSE"
@@ -234,61 +289,24 @@ class TradingStrategy:
         final_tp = take_profit if take_profit else default_tp
         final_position_size = position_size if position_size is not None else 0.1
 
-        # --- Route through execution pipeline if available ---
-        if self.execution_engine and self.risk_manager:
-            order_req = OrderRequest(
-                symbol=self.symbol,
-                side=side,
-                order_type="market",
-                amount=final_position_size,
-                price=current_price,
-                stop_loss=final_sl,
-                take_profit=final_tp,
-            )
-            portfolio = await self.execution_engine.sync_portfolio()
-            open_count = len(portfolio.open_positions)
+        success, fill_price, order_id = await self._execute_order(
+            side=side, amount=final_position_size, price=current_price,
+            event_prefix="open", stop_loss=final_sl, take_profit=final_tp,
+        )
+        if not success:
+            return
 
-            result = await self.risk_manager.execute(order_req, portfolio.total_equity, open_count)
+        if fill_price is not None and fill_price > 0:
+            current_price = fill_price
 
-            if result is None:
-                self.audit_log.record(
-                    event_type="open_rejected", mode=self._execution_mode,
-                    symbol=self.symbol, side=side, amount=final_position_size,
-                    price=current_price, risk_result="rejected",
-                )
-                return
-
-            self.order_tracker.record_order(
-                order_id=result.order_id, symbol=self.symbol, side=side,
-                order_type="market", amount=final_position_size, price=current_price,
-                status=result.status, filled_amount=result.filled_amount,
-                avg_price=result.avg_price, fee=result.fee,
-                raw_response=json.dumps(result.raw_response),
-            )
-
-            if result.status != OrderStatus.FILLED.value:
-                final_status = await self.order_tracker.poll_order(
-                    result.order_id, self.execution_engine
-                )
-                if final_status != OrderStatus.FILLED.value:
-                    self.logger.warning(f"Order {result.order_id} ended as {final_status}, skipping position open")
-                    self.audit_log.record(
-                        event_type="open_unfilled", mode=self._execution_mode,
-                        symbol=self.symbol, side=side, amount=final_position_size,
-                        price=current_price, order_id=result.order_id, status=final_status,
-                    )
-                    return
-
-            if result.avg_price > 0:
-                current_price = result.avg_price
-
+        if order_id is not None:
             self.audit_log.record(
                 event_type="open_filled", mode=self._execution_mode,
                 symbol=self.symbol, side=side, amount=final_position_size,
-                price=current_price, order_id=result.order_id, status=result.status,
+                price=current_price, order_id=order_id,
+                status=OrderStatus.FILLED.value,
             )
 
-        # --- Always persist via the original JSON pathway ---
         self.current_position = Position(
             entry_price=current_price,
             stop_loss=final_sl,
