@@ -1,8 +1,78 @@
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import Optional, List, Dict, Any, ClassVar, Tuple
 
 import numpy as np
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: Execution layer data models
+# ---------------------------------------------------------------------------
+
+class OrderSide(str, Enum):
+    BUY = "buy"
+    SELL = "sell"
+
+
+class OrderType(str, Enum):
+    MARKET = "market"
+    LIMIT = "limit"
+
+
+class OrderStatus(str, Enum):
+    PENDING = "pending"
+    SUBMITTED = "submitted"
+    FILLED = "filled"
+    PARTIAL = "partial"
+    CANCELLED = "cancelled"
+    REJECTED = "rejected"
+    FAILED = "failed"
+
+
+@dataclass
+class OrderRequest:
+    symbol: str
+    side: OrderSide
+    order_type: OrderType
+    amount: float
+    price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    client_order_id: Optional[str] = None
+
+    def __post_init__(self):
+        if not isinstance(self.side, OrderSide):
+            self.side = OrderSide(self.side)
+        if not isinstance(self.order_type, OrderType):
+            self.order_type = OrderType(self.order_type)
+
+
+@dataclass
+class OrderResult:
+    order_id: str
+    status: str
+    filled_amount: float
+    avg_price: float
+    fee: float
+    timestamp: datetime
+    raw_response: dict = field(default_factory=dict)
+
+
+@dataclass
+class AccountBalance:
+    total: Dict[str, float]
+    free: Dict[str, float]
+    used: Dict[str, float]
+    timestamp: datetime
+
+
+@dataclass
+class Portfolio:
+    balances: AccountBalance
+    open_positions: List[Any]
+    unrealized_pnl: float
+    total_equity: float
 
 
 @dataclass
