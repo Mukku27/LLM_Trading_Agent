@@ -3,12 +3,19 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 
+from ccxt import NetworkError as CCXTNetworkError
+from ccxt import ExchangeNotAvailable, OnMaintenance
+
 from core.data_persistence import DataPersistence
 from execution.base import ExecutionEngine
 from execution.connectors.base import ExchangeConnector
 from utils.dataclass import (
     OrderRequest, OrderResult, AccountBalance, Portfolio, OrderStatus,
 )
+
+# Errors that indicate the testnet is unavailable — safe to simulate past.
+# All other CCXT errors (auth, funds, bad params) must propagate as FAILED.
+_SIMULATABLE_ERRORS = (CCXTNetworkError, ExchangeNotAvailable, OnMaintenance)
 
 
 class PaperEngine(ExecutionEngine):
@@ -62,10 +69,10 @@ class PaperEngine(ExecutionEngine):
                 timestamp=datetime.now(),
                 raw_response=raw,
             )
-        except Exception as e:
+        except _SIMULATABLE_ERRORS as e:
             self.logger.warning(
-                f"[Paper] Testnet order failed ({e}), using simulated fill. "
-                f"Review the error to rule out config/balance issues."
+                f"[Paper] Testnet unavailable ({type(e).__name__}: {e}), "
+                f"using simulated fill."
             )
             return OrderResult(
                 order_id=client_id,
@@ -79,6 +86,20 @@ class PaperEngine(ExecutionEngine):
                     "simulated": True,
                     "error": str(e),
                 },
+            )
+        except Exception as e:
+            self.logger.error(
+                f"[Paper] Order FAILED ({type(e).__name__}: {e}). "
+                f"This is NOT a testnet-availability issue."
+            )
+            return OrderResult(
+                order_id=client_id,
+                status=OrderStatus.FAILED.value,
+                filled_amount=0.0,
+                avg_price=0.0,
+                fee=0.0,
+                timestamp=datetime.now(),
+                raw_response={"error": str(e), "error_type": type(e).__name__},
             )
 
     async def cancel_order(self, order_id: str, symbol: str) -> bool:
