@@ -13,6 +13,12 @@ class BinanceConnector(ExchangeConnector):
         api_key = os.environ.get("EXCHANGE_API_KEY", "")
         api_secret = os.environ.get("EXCHANGE_API_SECRET", "")
 
+        if not api_key or not api_secret:
+            raise ValueError(
+                "Exchange credentials are missing or empty. "
+                "Set EXCHANGE_API_KEY and EXCHANGE_API_SECRET environment variables."
+            )
+
         self.exchange = ccxt.binance({
             "apiKey": api_key,
             "secret": api_secret,

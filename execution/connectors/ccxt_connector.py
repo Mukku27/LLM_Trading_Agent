@@ -33,6 +33,12 @@ class CCXTConnector(ExchangeConnector):
         api_secret = os.environ.get("EXCHANGE_API_SECRET", "")
         passphrase = os.environ.get("EXCHANGE_API_PASSPHRASE", "")
 
+        if not api_key or not api_secret:
+            raise ValueError(
+                "Exchange credentials are missing or empty. "
+                "Set EXCHANGE_API_KEY and EXCHANGE_API_SECRET environment variables."
+            )
+
         config: dict = {
             "apiKey": api_key,
             "secret": api_secret,
