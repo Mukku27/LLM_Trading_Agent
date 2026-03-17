@@ -37,6 +37,7 @@ logs/
 *.log
 
 # Configuration files with sensitive data
+config/config.ini
 config/model_config.ini
 
 # SQLite databases
