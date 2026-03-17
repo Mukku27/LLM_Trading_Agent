@@ -64,10 +64,13 @@ class ModelManager:
         )
 
     def _get_fallback_settings(self) -> ModelSettings:
+        api_key = os.environ.get("LLM_API_KEY") or self.config.get(
+            "model_fallback_settings", "api_key", fallback=""
+        )
         return ModelSettings(
             name=self.config.get("model_fallback_settings", "name"),
             base_url=self.config.get("model_fallback_settings", "base_url"),
-            api_key=self.config.get("model_fallback_settings", "api_key")
+            api_key=api_key,
         )
 
     def _init_client(self) -> AsyncOpenAI:

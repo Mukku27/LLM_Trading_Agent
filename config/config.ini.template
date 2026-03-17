@@ -27,9 +27,7 @@ simulated_equity = 10000.0
 [model_fallback_settings]
 name = deepseek/deepseek-r1-0528:free
 base_url = https://openrouter.ai/api/v1
-; WARNING: Do not put real API keys here — use .env or LLM_API_KEY env var instead.
-; This placeholder exists only so the config parser has a fallback value.
-api_key = api-key-here
+; API key is read from LLM_API_KEY env var (see .env.example).
 
 [paths]
 log_dir = logs
