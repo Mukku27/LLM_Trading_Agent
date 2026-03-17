@@ -3,11 +3,13 @@ Sandbox tests for PaperEngine.
 Uses a mock connector to test paper trading logic without real credentials.
 """
 
-from unittest.mock import AsyncMock
+import os
+from unittest.mock import patch, AsyncMock
 
 import ccxt
 import pytest
 
+from execution.connectors.binance import BinanceConnector
 from execution.paper_engine import PaperEngine
 from utils.dataclass import OrderRequest, OrderStatus
 
@@ -82,3 +84,10 @@ async def test_sync_portfolio_simulated(paper_engine):
     portfolio = await paper_engine.sync_portfolio()
     assert portfolio.total_equity >= 10000
     await paper_engine.close()
+
+
+def test_binance_connector_rejects_missing_credentials():
+    """Connector must fail fast when credentials are empty."""
+    with patch.dict(os.environ, {}, clear=True):
+        with pytest.raises(ValueError, match="credentials are missing or empty"):
+            BinanceConnector(sandbox=True)
