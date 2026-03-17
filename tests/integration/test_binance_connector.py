@@ -15,13 +15,10 @@ import pytest_asyncio
 from execution.connectors.binance import BinanceConnector
 
 
-pytestmark = pytest.mark.integration
-
-SKIP_REASON = "Set EXCHANGE_API_KEY and EXCHANGE_API_SECRET for Binance testnet to run"
-requires_creds = pytest.mark.skipif(
-    not os.environ.get("EXCHANGE_API_KEY"),
-    reason=SKIP_REASON,
-)
+pytestmark = [pytest.mark.integration, pytest.mark.skipif(
+    not os.environ.get("EXCHANGE_API_KEY") or not os.environ.get("EXCHANGE_API_SECRET"),
+    reason="Set EXCHANGE_API_KEY and EXCHANGE_API_SECRET for Binance testnet to run",
+)]
 
 
 @pytest_asyncio.fixture
@@ -31,7 +28,6 @@ async def connector():
     await c.close()
 
 
-@requires_creds
 @pytest.mark.asyncio
 async def test_fetch_balance(connector):
     balance = await connector.fetch_balance()
@@ -39,7 +35,6 @@ async def test_fetch_balance(connector):
     assert isinstance(balance["total"], dict)
 
 
-@requires_creds
 @pytest.mark.asyncio
 async def test_fetch_open_orders(connector):
     orders = await connector.fetch_open_orders("BTC/USDT")
