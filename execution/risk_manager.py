@@ -1,9 +1,11 @@
 import asyncio
 import configparser
 import functools
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, date
+from pathlib import Path
 from typing import Optional, List
 
 from execution.base import ExecutionEngine
@@ -35,6 +37,7 @@ class RiskManager:
         engine: ExecutionEngine,
         config: configparser.ConfigParser,
         logger,
+        data_dir: str = "trading_data",
     ) -> None:
         self.engine = engine
         self.config = config
@@ -52,14 +55,86 @@ class RiskManager:
         whitelist_raw = config.get("execution", "symbol_whitelist", fallback="BTC/USDC")
         self.symbol_whitelist: set = {s.strip() for s in whitelist_raw.split(",")}
 
-        self._daily_stats = _DailyStats()
+        self._db_path = Path(data_dir) / "orders.db"
+        self._db_path.parent.mkdir(exist_ok=True)
+        self._ensure_schema()
+
+        self._daily_stats = self._load_daily_stats()
         self._last_trade_time: dict[str, float] = {}
         self._recent_order_timestamps: List[float] = []
+
+    # ------------------------------------------------------------------
+    # SQLite persistence for daily stats
+    # ------------------------------------------------------------------
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self._db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _ensure_schema(self) -> None:
+        conn = self._connect()
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS daily_stats (
+                    date          TEXT PRIMARY KEY,
+                    realized_pnl  REAL NOT NULL DEFAULT 0,
+                    order_count   INTEGER NOT NULL DEFAULT 0,
+                    updated_at    TEXT NOT NULL
+                )
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _load_daily_stats(self) -> _DailyStats:
+        today = date.today()
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT realized_pnl, order_count FROM daily_stats WHERE date = ?",
+                (today.isoformat(),),
+            ).fetchone()
+            if row:
+                self.logger.info(
+                    f"[Risk] Restored daily stats: pnl={row['realized_pnl']:.2f}, "
+                    f"orders={row['order_count']}"
+                )
+                return _DailyStats(
+                    date=today,
+                    realized_pnl=row["realized_pnl"],
+                    order_count=row["order_count"],
+                )
+            return _DailyStats(date=today)
+        finally:
+            conn.close()
+
+    def _persist_daily_stats(self) -> None:
+        now = datetime.now().isoformat()
+        conn = self._connect()
+        try:
+            conn.execute(
+                """INSERT INTO daily_stats (date, realized_pnl, order_count, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(date) DO UPDATE SET
+                       realized_pnl = excluded.realized_pnl,
+                       order_count  = excluded.order_count,
+                       updated_at   = excluded.updated_at""",
+                (self._daily_stats.date.isoformat(),
+                 self._daily_stats.realized_pnl,
+                 self._daily_stats.order_count,
+                 now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
 
     def _rotate_daily_stats(self) -> None:
         today = date.today()
         if self._daily_stats.date != today:
-            self._daily_stats = _DailyStats(date=today)
+            self._daily_stats = self._load_daily_stats()
 
     def _prune_rate_window(self) -> None:
         cutoff = time.time() - 60
@@ -145,6 +220,7 @@ class RiskManager:
 
         if result.status == OrderStatus.FILLED.value:
             self._daily_stats.order_count += 1
+            self._persist_daily_stats()
 
         return result
 
@@ -152,6 +228,7 @@ class RiskManager:
         """Update daily P&L after a position close."""
         self._rotate_daily_stats()
         self._daily_stats.realized_pnl += pnl
+        self._persist_daily_stats()
 
     def activate_kill_switch(self) -> None:
         self.kill_switch = True

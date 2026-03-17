@@ -13,8 +13,8 @@ def engine(base_config, mock_logger):
 
 
 @pytest.fixture
-def risk(engine, base_config, mock_logger):
-    return RiskManager(engine, base_config, mock_logger)
+def risk(engine, base_config, mock_logger, tmp_path):
+    return RiskManager(engine, base_config, mock_logger, data_dir=str(tmp_path))
 
 
 class TestKillSwitch:
@@ -109,19 +109,55 @@ class TestDailyLoss:
         assert "Daily loss" in result.reason
 
 
+class TestDailyLossPersistence:
+    def test_circuit_breaker_survives_restart(self, engine, base_config, mock_logger, tmp_path):
+        """Simulate: accumulate losses → restart (new instance) → verify breaker still trips."""
+        # Instance 1: record a big loss
+        risk1 = RiskManager(engine, base_config, mock_logger, data_dir=str(tmp_path))
+        risk1.record_pnl(-1100)  # 11% of $10k equity → exceeds 10% max
+
+        # Instance 2: "restart" — new object, same DB
+        risk2 = RiskManager(engine, base_config, mock_logger, data_dir=str(tmp_path))
+        order = OrderRequest(symbol="BTC/USDC", side="buy", order_type="market", amount=0.01, price=50000)
+        result = risk2.validate(order, portfolio_equity=10000, open_position_count=0)
+        assert not result.approved
+        assert "Daily loss" in result.reason
+
+    def test_pnl_accumulates_across_restarts(self, engine, base_config, mock_logger, tmp_path):
+        """Two separate instances each recording partial losses should sum correctly."""
+        risk1 = RiskManager(engine, base_config, mock_logger, data_dir=str(tmp_path))
+        risk1.record_pnl(-500)  # 5% — not yet tripping 10% limit
+
+        risk2 = RiskManager(engine, base_config, mock_logger, data_dir=str(tmp_path))
+        risk2.record_pnl(-600)  # total now -1100 = 11% → should trip
+
+        order = OrderRequest(symbol="BTC/USDC", side="buy", order_type="market", amount=0.01, price=50000)
+        result = risk2.validate(order, portfolio_equity=10000, open_position_count=0)
+        assert not result.approved
+        assert "Daily loss" in result.reason
+
+    def test_fresh_day_starts_clean(self, engine, base_config, mock_logger, tmp_path):
+        """A new day should not carry over the previous day's losses."""
+        risk = RiskManager(engine, base_config, mock_logger, data_dir=str(tmp_path))
+        # No losses recorded today
+        order = OrderRequest(symbol="BTC/USDC", side="buy", order_type="market", amount=0.01, price=50000)
+        result = risk.validate(order, portfolio_equity=10000, open_position_count=0)
+        assert result.approved
+
+
 class TestCooldown:
-    def test_rejects_during_cooldown(self, base_config, engine, mock_logger):
+    def test_rejects_during_cooldown(self, base_config, engine, mock_logger, tmp_path):
         base_config.set("execution", "cooldown_seconds", "5")
-        risk = RiskManager(engine, base_config, mock_logger)
+        risk = RiskManager(engine, base_config, mock_logger, data_dir=str(tmp_path))
         risk._last_trade_time["BTC/USDC"] = time.time()
         order = OrderRequest(symbol="BTC/USDC", side="buy", order_type="market", amount=0.01, price=50000)
         result = risk.validate(order, portfolio_equity=10000, open_position_count=0)
         assert not result.approved
         assert "Cooldown" in result.reason
 
-    def test_allows_close_during_cooldown(self, base_config, engine, mock_logger):
+    def test_allows_close_during_cooldown(self, base_config, engine, mock_logger, tmp_path):
         base_config.set("execution", "cooldown_seconds", "5")
-        risk = RiskManager(engine, base_config, mock_logger)
+        risk = RiskManager(engine, base_config, mock_logger, data_dir=str(tmp_path))
         risk._last_trade_time["BTC/USDC"] = time.time()
         order = OrderRequest(symbol="BTC/USDC", side="sell", order_type="market", amount=0.01, price=50000)
         result = risk.validate(order, portfolio_equity=10000, open_position_count=1, is_closing=True)
@@ -129,9 +165,9 @@ class TestCooldown:
 
 
 class TestRateLimit:
-    def test_rejects_when_rate_exceeded(self, base_config, engine, mock_logger):
+    def test_rejects_when_rate_exceeded(self, base_config, engine, mock_logger, tmp_path):
         base_config.set("execution", "max_orders_per_minute", "2")
-        risk = RiskManager(engine, base_config, mock_logger)
+        risk = RiskManager(engine, base_config, mock_logger, data_dir=str(tmp_path))
         now = time.time()
         risk._recent_order_timestamps = [now - 5, now - 3]
         order = OrderRequest(symbol="BTC/USDC", side="buy", order_type="market", amount=0.01, price=50000)
@@ -139,9 +175,9 @@ class TestRateLimit:
         assert not result.approved
         assert "Rate limit" in result.reason
 
-    def test_allows_close_when_rate_exceeded(self, base_config, engine, mock_logger):
+    def test_allows_close_when_rate_exceeded(self, base_config, engine, mock_logger, tmp_path):
         base_config.set("execution", "max_orders_per_minute", "2")
-        risk = RiskManager(engine, base_config, mock_logger)
+        risk = RiskManager(engine, base_config, mock_logger, data_dir=str(tmp_path))
         now = time.time()
         risk._recent_order_timestamps = [now - 5, now - 3]
         order = OrderRequest(symbol="BTC/USDC", side="sell", order_type="market", amount=0.01, price=50000)
