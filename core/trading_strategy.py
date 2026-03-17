@@ -119,7 +119,7 @@ class TradingStrategy:
         open_count = len(portfolio.open_positions)
 
         is_closing = event_prefix == "close"
-        result = await self.risk_manager.execute(order_req, portfolio.total_equity, open_count, is_closing=is_closing)
+        result = await self.risk_manager.execute(order_req, portfolio.total_equity, open_count, is_closing=is_closing, estimated_market_price=price)
 
         if result is None:
             self.audit_log.record(
