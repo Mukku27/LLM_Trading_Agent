@@ -71,7 +71,7 @@ class RiskManager:
     # Public API
     # ------------------------------------------------------------------
 
-    def validate(self, order: OrderRequest, portfolio_equity: float, open_position_count: int, *, is_closing: bool = False) -> RiskCheckResult:
+    def validate(self, order: OrderRequest, portfolio_equity: float, open_position_count: int, *, is_closing: bool = False, estimated_market_price: Optional[float] = None) -> RiskCheckResult:
         """Run the full pre-trade validation checklist."""
         self._rotate_daily_stats()
 
@@ -82,7 +82,8 @@ class RiskManager:
             return RiskCheckResult(False, f"Symbol {order.symbol} not in whitelist: {self.symbol_whitelist}")
 
         if portfolio_equity > 0:
-            order_value = order.amount * (order.price or 0)
+            price = order.price or estimated_market_price or 0
+            order_value = order.amount * price
             position_pct = (order_value / portfolio_equity) * 100
             if position_pct > self.max_position_pct:
                 return RiskCheckResult(
@@ -117,9 +118,9 @@ class RiskManager:
 
         return RiskCheckResult(True)
 
-    async def execute(self, order: OrderRequest, portfolio_equity: float, open_position_count: int, *, is_closing: bool = False) -> Optional[OrderResult]:
+    async def execute(self, order: OrderRequest, portfolio_equity: float, open_position_count: int, *, is_closing: bool = False, estimated_market_price: Optional[float] = None) -> Optional[OrderResult]:
         """Validate then route to the execution engine."""
-        check = self.validate(order, portfolio_equity, open_position_count, is_closing=is_closing)
+        check = self.validate(order, portfolio_equity, open_position_count, is_closing=is_closing, estimated_market_price=estimated_market_price)
 
         if not check.approved:
             self.logger.warning(f"[Risk] Order REJECTED: {check.reason}")
