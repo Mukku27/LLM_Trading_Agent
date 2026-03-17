@@ -1,4 +1,4 @@
-import tempfile
+import threading
 
 import pytest
 
@@ -62,6 +62,96 @@ class TestStateTransitions:
         )
         tracker.update_status("ord-5", OrderStatus.SUBMITTED.value)
         assert tracker.update_status("ord-5", OrderStatus.CANCELLED.value) is True
+
+    def test_nonexistent_order_returns_false(self, tracker):
+        assert tracker.update_status("missing", OrderStatus.SUBMITTED.value) is False
+
+
+class TestAtomicUpdateStatus:
+    def test_concurrent_updates_only_one_wins(self, tracker):
+        """Simulate two threads racing to transition SUBMITTED → FILLED/CANCELLED."""
+        tracker.record_order(
+            order_id="race-1", symbol="BTC/USDC", side="buy",
+            order_type="market", amount=0.01, price=50000,
+            status=OrderStatus.PENDING.value,
+        )
+        tracker.update_status("race-1", OrderStatus.SUBMITTED.value)
+
+        results = {}
+        barrier = threading.Barrier(2)
+
+        def try_update(name, new_status):
+            barrier.wait()
+            results[name] = tracker.update_status("race-1", new_status)
+
+        t1 = threading.Thread(target=try_update, args=("fill", OrderStatus.FILLED.value))
+        t2 = threading.Thread(target=try_update, args=("cancel", OrderStatus.CANCELLED.value))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        # Exactly one should succeed
+        assert sum(results.values()) == 1
+        final = tracker.get_order("race-1")["status"]
+        assert final in (OrderStatus.FILLED.value, OrderStatus.CANCELLED.value)
+
+    def test_second_transition_from_same_state_fails(self, tracker):
+        """After a successful transition, a second attempt from the old state fails."""
+        tracker.record_order(
+            order_id="race-2", symbol="BTC/USDC", side="buy",
+            order_type="market", amount=0.01, price=50000,
+            status=OrderStatus.PENDING.value,
+        )
+        tracker.update_status("race-2", OrderStatus.SUBMITTED.value)
+        assert tracker.update_status("race-2", OrderStatus.FILLED.value) is True
+        # Now it's FILLED — trying to move from SUBMITTED again should fail
+        assert tracker.update_status("race-2", OrderStatus.CANCELLED.value) is False
+
+
+class TestRecordOrderPreservesHistory:
+    def test_re_record_preserves_created_at(self, tracker):
+        """INSERT ON CONFLICT should update mutable fields but preserve created_at."""
+        tracker.record_order(
+            order_id="hist-1", symbol="BTC/USDC", side="buy",
+            order_type="market", amount=0.01, price=50000,
+            status=OrderStatus.PENDING.value,
+        )
+        original = tracker.get_order("hist-1")
+        original_created = original["created_at"]
+
+        # Re-record with updated status (simulates a fill update)
+        tracker.record_order(
+            order_id="hist-1", symbol="BTC/USDC", side="buy",
+            order_type="market", amount=0.01, price=50000,
+            status=OrderStatus.FILLED.value,
+            filled_amount=0.01, avg_price=50100, fee=0.05,
+        )
+        updated = tracker.get_order("hist-1")
+        assert updated["created_at"] == original_created  # preserved
+        assert updated["status"] == OrderStatus.FILLED.value  # updated
+        assert updated["filled_amount"] == 0.01  # updated
+        assert updated["updated_at"] != original_created  # refreshed
+
+    def test_re_record_preserves_immutable_fields(self, tracker):
+        """Side, symbol, order_type, amount should not change on conflict update."""
+        tracker.record_order(
+            order_id="hist-2", symbol="BTC/USDC", side="buy",
+            order_type="market", amount=0.5, price=50000,
+            status=OrderStatus.PENDING.value,
+        )
+        # Re-record with different side/amount (should be ignored by ON CONFLICT)
+        tracker.record_order(
+            order_id="hist-2", symbol="ETH/USDC", side="sell",
+            order_type="limit", amount=999,  price=99999,
+            status=OrderStatus.FILLED.value,
+        )
+        row = tracker.get_order("hist-2")
+        assert row["symbol"] == "BTC/USDC"  # preserved
+        assert row["side"] == "buy"  # preserved
+        assert row["order_type"] == "market"  # preserved
+        assert row["amount"] == 0.5  # preserved
+        assert row["status"] == OrderStatus.FILLED.value  # updated
 
 
 class TestOpenOrders:
