@@ -3,12 +3,21 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 
+from ccxt import AuthenticationError as CCXTAuthError
+from ccxt import NetworkError as CCXTNetworkError
+
 from core.data_persistence import DataPersistence
 from execution.base import ExecutionEngine
 from execution.connectors.base import ExchangeConnector
 from utils.dataclass import (
     OrderRequest, OrderResult, AccountBalance, Portfolio, OrderStatus,
 )
+
+# Transient errors safe to retry/fallback on. All are NetworkError subclasses.
+_TRANSIENT_ERRORS = (CCXTNetworkError,)
+
+# Errors that indicate a fundamental config/auth problem — must propagate.
+_FATAL_ERRORS = (CCXTAuthError,)
 
 
 class LiveEngine(ExecutionEngine):
@@ -24,6 +33,7 @@ class LiveEngine(ExecutionEngine):
         self.config = config
         self.logger = logger
         self.data_persistence = DataPersistence(logger=logger)
+        self._last_balance: Optional[AccountBalance] = None
 
     async def place_order(self, order: OrderRequest) -> OrderResult:
         client_id = order.client_order_id or str(uuid.uuid4())
@@ -80,27 +90,58 @@ class LiveEngine(ExecutionEngine):
             return False
 
     async def get_balance(self) -> AccountBalance:
-        raw = await self.connector.fetch_balance()
-        return AccountBalance(
-            total=dict(raw.get("total", {})),
-            free=dict(raw.get("free", {})),
-            used=dict(raw.get("used", {})),
-            timestamp=datetime.now(),
-        )
+        try:
+            raw = await self.connector.fetch_balance()
+            balance = AccountBalance(
+                total=dict(raw.get("total", {})),
+                free=dict(raw.get("free", {})),
+                used=dict(raw.get("used", {})),
+                timestamp=datetime.now(),
+            )
+            self._last_balance = balance
+            return balance
+        except _FATAL_ERRORS:
+            raise
+        except _TRANSIENT_ERRORS as e:
+            self.logger.warning(
+                f"[Live] fetch_balance failed ({type(e).__name__}: {e}), "
+                f"using last-known-good balance"
+            )
+            if self._last_balance is not None:
+                return self._last_balance
+            raise
 
     async def get_open_orders(self, symbol: Optional[str] = None) -> List[dict]:
-        return await self.connector.fetch_open_orders(symbol)
+        try:
+            return await self.connector.fetch_open_orders(symbol)
+        except _FATAL_ERRORS:
+            raise
+        except _TRANSIENT_ERRORS as e:
+            self.logger.warning(
+                f"[Live] fetch_open_orders failed ({type(e).__name__}: {e}), "
+                f"returning empty list"
+            )
+            return []
 
     async def get_order_status(self, order_id: str, symbol: str) -> OrderStatus:
-        raw = await self.connector.fetch_order(order_id, symbol)
-        status_map = {
-            "closed": OrderStatus.FILLED,
-            "open": OrderStatus.SUBMITTED,
-            "canceled": OrderStatus.CANCELLED,
-            "expired": OrderStatus.CANCELLED,
-            "rejected": OrderStatus.REJECTED,
-        }
-        return status_map.get(raw.get("status", ""), OrderStatus.PENDING)
+        try:
+            raw = await self.connector.fetch_order(order_id, symbol)
+            status_map = {
+                "closed": OrderStatus.FILLED,
+                "open": OrderStatus.SUBMITTED,
+                "canceled": OrderStatus.CANCELLED,
+                "expired": OrderStatus.CANCELLED,
+                "rejected": OrderStatus.REJECTED,
+            }
+            return status_map.get(raw.get("status", ""), OrderStatus.PENDING)
+        except _FATAL_ERRORS:
+            raise
+        except _TRANSIENT_ERRORS as e:
+            self.logger.warning(
+                f"[Live] fetch_order failed for {order_id} ({type(e).__name__}: {e}), "
+                f"returning PENDING"
+            )
+            return OrderStatus.PENDING
 
     async def sync_portfolio(self) -> Portfolio:
         balance = await self.get_balance()
