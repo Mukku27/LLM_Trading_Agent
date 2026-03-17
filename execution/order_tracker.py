@@ -20,6 +20,12 @@ _VALID_TRANSITIONS: Dict[str, set] = {
     OrderStatus.FAILED.value: {OrderStatus.SUBMITTED.value},
 }
 
+# Pre-compute reverse map: for each target status, which source statuses can reach it?
+_ALLOWED_SOURCES: Dict[str, set] = {}
+for _src, _targets in _VALID_TRANSITIONS.items():
+    for _tgt in _targets:
+        _ALLOWED_SOURCES.setdefault(_tgt, set()).add(_src)
+
 
 class OrderTracker:
     """
@@ -82,10 +88,17 @@ class OrderTracker:
         conn = self._connect()
         try:
             conn.execute(
-                """INSERT OR REPLACE INTO orders
+                """INSERT INTO orders
                    (order_id, client_id, symbol, side, order_type, amount, price,
                     status, filled_amount, avg_price, fee, created_at, updated_at, raw_response)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(order_id) DO UPDATE SET
+                       status        = excluded.status,
+                       filled_amount = excluded.filled_amount,
+                       avg_price     = excluded.avg_price,
+                       fee           = excluded.fee,
+                       updated_at    = excluded.updated_at,
+                       raw_response  = excluded.raw_response""",
                 (order_id, client_id, symbol, side, order_type, amount, price,
                  status, filled_amount, avg_price, fee, now, now, raw_response),
             )
@@ -94,17 +107,18 @@ class OrderTracker:
             conn.close()
 
     def update_status(self, order_id: str, new_status: str, **kwargs) -> bool:
-        """Transition order status respecting the state machine."""
-        row = self.get_order(order_id)
-        if row is None:
-            self.logger.error(f"[OrderTracker] Order {order_id} not found")
-            return False
+        """
+        Atomically transition order status respecting the state machine.
 
-        current = row["status"]
-        allowed = _VALID_TRANSITIONS.get(current, set())
-        if new_status not in allowed:
+        Uses a single UPDATE with a WHERE clause that checks both the order_id
+        AND that the current status is a valid source for the requested transition.
+        If rowcount == 0, either the order doesn't exist or the transition is invalid
+        (including the case where a concurrent caller already moved it).
+        """
+        allowed_sources = _ALLOWED_SOURCES.get(new_status)
+        if not allowed_sources:
             self.logger.warning(
-                f"[OrderTracker] Invalid transition {current} -> {new_status} for {order_id}"
+                f"[OrderTracker] No valid source states for target status {new_status}"
             )
             return False
 
@@ -117,15 +131,34 @@ class OrderTracker:
                 sets.append(f"{col} = ?")
                 vals.append(kwargs[col])
 
+        placeholders = ", ".join("?" for _ in allowed_sources)
         vals.append(order_id)
+        vals.extend(allowed_sources)
+
         conn = self._connect()
         try:
-            conn.execute(f"UPDATE orders SET {', '.join(sets)} WHERE order_id = ?", vals)
+            cursor = conn.execute(
+                f"UPDATE orders SET {', '.join(sets)} "
+                f"WHERE order_id = ? AND status IN ({placeholders})",
+                vals,
+            )
             conn.commit()
+            affected = cursor.rowcount
         finally:
             conn.close()
 
-        self.logger.info(f"[OrderTracker] {order_id}: {current} -> {new_status}")
+        if affected == 0:
+            row = self.get_order(order_id)
+            if row is None:
+                self.logger.error(f"[OrderTracker] Order {order_id} not found")
+            else:
+                self.logger.warning(
+                    f"[OrderTracker] Invalid transition {row['status']} -> {new_status} "
+                    f"for {order_id}"
+                )
+            return False
+
+        self.logger.info(f"[OrderTracker] {order_id}: -> {new_status}")
         return True
 
     def get_order(self, order_id: str) -> Optional[Dict[str, Any]]:
