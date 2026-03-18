@@ -2,11 +2,12 @@ import asyncio
 import configparser
 import functools
 import sqlite3
+import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from pathlib import Path
-from typing import Optional, List
+from typing import Callable, Optional, List
 
 from execution.base import ExecutionEngine
 from utils.dataclass import OrderRequest, OrderResult, OrderStatus
@@ -18,10 +19,14 @@ class RiskCheckResult:
     reason: Optional[str] = None
 
 
+def _utc_today() -> date:
+    return datetime.now(timezone.utc).date()
+
+
 @dataclass
 class _DailyStats:
-    """Accumulated stats for the current trading day."""
-    date: date = field(default_factory=lambda: date.today())
+    """Accumulated stats for the current trading day (UTC)."""
+    date: date = field(default_factory=_utc_today)
     realized_pnl: float = 0.0
     order_count: int = 0
 
@@ -38,6 +43,8 @@ class RiskManager:
         config: configparser.ConfigParser,
         logger,
         data_dir: str = "trading_data",
+        *,
+        confirm_callback: Optional[Callable[[str], bool]] = None,
     ) -> None:
         self.engine = engine
         self.config = config
@@ -51,6 +58,8 @@ class RiskManager:
         self.cooldown_seconds: int = config.getint("execution", "cooldown_seconds", fallback=60)
         self.order_timeout_seconds: int = config.getint("execution", "order_timeout_seconds", fallback=300)
         self.max_orders_per_minute: int = config.getint("execution", "max_orders_per_minute", fallback=5)
+
+        self._confirm_callback = confirm_callback
 
         whitelist_raw = config.get("execution", "symbol_whitelist", fallback="BTC/USDC")
         self.symbol_whitelist: set = {s.strip() for s in whitelist_raw.split(",")}
@@ -88,7 +97,7 @@ class RiskManager:
             conn.close()
 
     def _load_daily_stats(self) -> _DailyStats:
-        today = date.today()
+        today = _utc_today()
         conn = self._connect()
         try:
             row = conn.execute(
@@ -110,7 +119,7 @@ class RiskManager:
             conn.close()
 
     def _persist_daily_stats(self) -> None:
-        now = datetime.now().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         conn = self._connect()
         try:
             conn.execute(
@@ -132,7 +141,7 @@ class RiskManager:
     # ------------------------------------------------------------------
 
     def _rotate_daily_stats(self) -> None:
-        today = date.today()
+        today = _utc_today()
         if self._daily_stats.date != today:
             self._daily_stats = self._load_daily_stats()
 
@@ -202,14 +211,27 @@ class RiskManager:
             return None
 
         if self.confirm_trades and self.config.get("execution", "mode", fallback="dry_run") == "live":
-            self.logger.info(
-                f"[Risk] Confirmation required: {order.side} {order.amount} {order.symbol} @ {order.price}"
+            prompt = (
+                f"{order.side} {order.amount} {order.symbol} @ {order.price}"
             )
-            loop = asyncio.get_running_loop()
-            confirmation = await loop.run_in_executor(
-                None, functools.partial(input, "Confirm trade? (yes/no): ")
-            )
-            if confirmation.strip().lower() != "yes":
+            self.logger.info(f"[Risk] Confirmation required: {prompt}")
+
+            if self._confirm_callback is not None:
+                confirmed = self._confirm_callback(prompt)
+            elif sys.stdin.isatty():
+                loop = asyncio.get_running_loop()
+                answer = await loop.run_in_executor(
+                    None, functools.partial(input, "Confirm trade? (yes/no): ")
+                )
+                confirmed = answer.strip().lower() == "yes"
+            else:
+                self.logger.warning(
+                    "[Risk] Non-interactive environment — auto-rejecting trade. "
+                    "Set confirm_trades = false or provide a confirm_callback."
+                )
+                confirmed = False
+
+            if not confirmed:
                 self.logger.info("[Risk] Trade rejected by user")
                 return None
 
