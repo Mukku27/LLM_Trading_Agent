@@ -145,7 +145,8 @@ class LiveEngine(ExecutionEngine):
 
     async def sync_portfolio(self) -> Portfolio:
         balance = await self.get_balance()
-        total_equity = sum(balance.total.values())
+        quote_currency = self._get_quote_currency()
+        total_equity = await self._compute_equity(balance, quote_currency)
         position = self.data_persistence.load_position()
         positions = [position] if position else []
         return Portfolio(
@@ -154,6 +155,32 @@ class LiveEngine(ExecutionEngine):
             unrealized_pnl=0.0,
             total_equity=total_equity,
         )
+
+    def _get_quote_currency(self) -> str:
+        symbol = self.config.get("exchange", "symbol", fallback="BTC/USDC")
+        return symbol.split("/")[-1]
+
+    async def _compute_equity(
+        self, balance: AccountBalance, quote_currency: str,
+    ) -> float:
+        """Convert all balances to *quote_currency* and return the total."""
+        total = 0.0
+        for currency, amount in balance.total.items():
+            if amount == 0:
+                continue
+            if currency == quote_currency:
+                total += amount
+                continue
+            pair = f"{currency}/{quote_currency}"
+            try:
+                ticker = await self.connector.fetch_ticker(pair)
+                price = float(ticker.get("last") or ticker.get("close") or 0)
+                total += amount * price
+            except Exception as e:
+                self.logger.warning(
+                    f"[Live] Cannot price {currency} via {pair}: {e}, skipping"
+                )
+        return total
 
     async def close(self) -> None:
         await self.connector.close()
