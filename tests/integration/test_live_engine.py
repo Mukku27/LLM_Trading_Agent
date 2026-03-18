@@ -8,7 +8,7 @@ import os
 
 import pytest
 
-from execution.connectors.binance import BinanceConnector
+from execution.connectors.ccxt_connector import CCXTConnector
 from execution.live_engine import LiveEngine
 from utils.dataclass import OrderRequest, OrderStatus
 
@@ -30,7 +30,7 @@ def testnet_config(base_config):
 
 @pytest.fixture
 async def engine(testnet_config, mock_logger):
-    connector = BinanceConnector(sandbox=True)
+    connector = CCXTConnector(exchange_name="binance", sandbox=True)
     eng = LiveEngine(connector, testnet_config, mock_logger)
     yield eng
     await eng.close()

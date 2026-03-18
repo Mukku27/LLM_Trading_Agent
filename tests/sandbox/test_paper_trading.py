@@ -9,7 +9,7 @@ from unittest.mock import patch, AsyncMock
 import ccxt
 import pytest
 
-from execution.connectors.binance import BinanceConnector
+from execution.connectors.ccxt_connector import CCXTConnector
 from execution.paper_engine import PaperEngine
 from utils.dataclass import OrderRequest, OrderStatus
 
@@ -86,8 +86,8 @@ async def test_sync_portfolio_simulated(paper_engine):
     await paper_engine.close()
 
 
-def test_binance_connector_rejects_missing_credentials():
+def test_connector_rejects_missing_credentials():
     """Connector must fail fast when credentials are empty."""
     with patch.dict(os.environ, {}, clear=True):
         with pytest.raises(ValueError, match="credentials are missing or empty"):
-            BinanceConnector(sandbox=True)
+            CCXTConnector(exchange_name="binance", sandbox=True)
