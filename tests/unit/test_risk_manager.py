@@ -1,10 +1,12 @@
 import time
+from datetime import date, datetime, timezone
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from execution.dry_run_engine import DryRunEngine
-from execution.risk_manager import RiskManager
-from utils.dataclass import OrderRequest
+from execution.risk_manager import RiskManager, _utc_today
+from utils.dataclass import OrderRequest, OrderResult, OrderStatus
 
 
 @pytest.fixture
@@ -183,3 +185,81 @@ class TestRateLimit:
         order = OrderRequest(symbol="BTC/USDC", side="sell", order_type="market", amount=0.01, price=50000)
         result = risk.validate(order, portfolio_equity=10000, open_position_count=1, is_closing=True)
         assert result.approved
+
+
+class TestConfirmTradesNonInteractive:
+    """LOW-13: confirm_trades must not block in non-interactive environments."""
+
+    def _live_config(self, base_config):
+        base_config.set("execution", "mode", "live")
+        base_config.set("execution", "confirm_trades", "true")
+        return base_config
+
+    @pytest.mark.asyncio
+    async def test_callback_approves(self, engine, base_config, mock_logger, tmp_path):
+        cfg = self._live_config(base_config)
+        risk = RiskManager(engine, cfg, mock_logger, data_dir=str(tmp_path),
+                           confirm_callback=lambda prompt: True)
+        order = OrderRequest(symbol="BTC/USDC", side="buy", order_type="market",
+                             amount=0.001, price=50000)
+        result = await risk.execute(order, portfolio_equity=10000, open_position_count=0)
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_callback_rejects(self, engine, base_config, mock_logger, tmp_path):
+        cfg = self._live_config(base_config)
+        risk = RiskManager(engine, cfg, mock_logger, data_dir=str(tmp_path),
+                           confirm_callback=lambda prompt: False)
+        order = OrderRequest(symbol="BTC/USDC", side="buy", order_type="market",
+                             amount=0.001, price=50000)
+        result = await risk.execute(order, portfolio_equity=10000, open_position_count=0)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_non_interactive_auto_rejects(self, engine, base_config, mock_logger, tmp_path):
+        """When stdin is not a TTY and no callback provided, trades are auto-rejected."""
+        cfg = self._live_config(base_config)
+        risk = RiskManager(engine, cfg, mock_logger, data_dir=str(tmp_path))
+        order = OrderRequest(symbol="BTC/USDC", side="buy", order_type="market",
+                             amount=0.001, price=50000)
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.isatty.return_value = False
+            result = await risk.execute(order, portfolio_equity=10000, open_position_count=0)
+        assert result is None
+        # Verify warning was logged
+        mock_logger.warning.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_confirm_trades_false_skips_confirmation(self, engine, base_config, mock_logger, tmp_path):
+        """When confirm_trades is false, no confirmation is needed regardless of mode."""
+        base_config.set("execution", "mode", "live")
+        base_config.set("execution", "confirm_trades", "false")
+        risk = RiskManager(engine, base_config, mock_logger, data_dir=str(tmp_path))
+        order = OrderRequest(symbol="BTC/USDC", side="buy", order_type="market",
+                             amount=0.001, price=50000)
+        result = await risk.execute(order, portfolio_equity=10000, open_position_count=0)
+        assert result is not None
+
+
+class TestUTCDailyStats:
+    """LOW-15: daily stats must use UTC, not local time."""
+
+    def test_utc_today_returns_utc_date(self):
+        utc_now = datetime.now(timezone.utc).date()
+        assert _utc_today() == utc_now
+
+    def test_daily_stats_date_is_utc(self, engine, base_config, mock_logger, tmp_path):
+        risk = RiskManager(engine, base_config, mock_logger, data_dir=str(tmp_path))
+        assert risk._daily_stats.date == _utc_today()
+
+    def test_persist_uses_utc_timestamp(self, engine, base_config, mock_logger, tmp_path):
+        """The updated_at timestamp stored in SQLite should be UTC."""
+        import sqlite3
+        risk = RiskManager(engine, base_config, mock_logger, data_dir=str(tmp_path))
+        risk.record_pnl(-50)
+        conn = sqlite3.connect(str(tmp_path / "orders.db"))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT updated_at FROM daily_stats").fetchone()
+        conn.close()
+        # UTC isoformat includes +00:00
+        assert "+00:00" in row["updated_at"]

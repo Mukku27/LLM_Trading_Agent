@@ -48,6 +48,8 @@ class TradingStrategy:
 
         self._failed_close_at: Optional[datetime] = None
         self._close_retry_backoff_seconds: int = 30
+        self._close_retry_count: int = 0
+        self._max_close_retries: int = 3
 
     # --- Delegate attributes to the composed analyzer for backward compatibility ---
 
@@ -137,6 +139,24 @@ class TradingStrategy:
             raw_response=json.dumps(result.raw_response),
         )
 
+        _TERMINAL_FAILURES = {
+            OrderStatus.FAILED.value,
+            OrderStatus.REJECTED.value,
+            OrderStatus.CANCELLED.value,
+        }
+
+        if result.status in _TERMINAL_FAILURES:
+            self.logger.warning(
+                f"Order {result.order_id} immediately {result.status}, "
+                f"skipping {event_prefix}"
+            )
+            self.audit_log.record(
+                event_type=f"{event_prefix}_unfilled", mode=self._execution_mode,
+                symbol=self.symbol, side=side, amount=amount,
+                price=price, order_id=result.order_id, status=result.status,
+            )
+            return False, None, None
+
         if result.status != OrderStatus.FILLED.value:
             final_status = await self.order_tracker.poll_order(
                 result.order_id, self.execution_engine, symbol=self.symbol
@@ -163,11 +183,12 @@ class TradingStrategy:
             return
 
         if self._failed_close_at:
+            current_backoff = self._close_retry_backoff_seconds * (2 ** self._close_retry_count)
             elapsed = (datetime.now() - self._failed_close_at).total_seconds()
-            if elapsed < self._close_retry_backoff_seconds:
+            if elapsed < current_backoff:
                 self.logger.debug(
                     f"Skipping close retry, backoff active for "
-                    f"{self._close_retry_backoff_seconds - int(elapsed)}s more"
+                    f"{current_backoff - int(elapsed)}s more"
                 )
                 return
             self._failed_close_at = None
@@ -198,11 +219,22 @@ class TradingStrategy:
             event_prefix="close",
         )
         if not success:
+            self._close_retry_count += 1
+            current_backoff = self._close_retry_backoff_seconds * (2 ** self._close_retry_count)
+            if self._close_retry_count >= self._max_close_retries:
+                self.logger.error(
+                    f"Close retries exhausted ({self._close_retry_count}/{self._max_close_retries}) "
+                    f"for {direction} position ({reason}), activating kill switch"
+                )
+                if self.risk_manager:
+                    self.risk_manager.activate_kill_switch()
+            else:
+                self.logger.warning(
+                    f"Failed to execute close for {direction} position ({reason}), "
+                    f"retry {self._close_retry_count}/{self._max_close_retries} "
+                    f"after {current_backoff}s backoff"
+                )
             self._failed_close_at = datetime.now()
-            self.logger.warning(
-                f"Failed to execute close for {direction} position ({reason}), "
-                f"will retry after {self._close_retry_backoff_seconds}s backoff"
-            )
             return
 
         pnl: Optional[float] = None
@@ -240,6 +272,7 @@ class TradingStrategy:
         self.data_persistence.save_position(None)
         self.current_position = None
         self._failed_close_at = None
+        self._close_retry_count = 0
 
     def _should_close_position(self, signal: str) -> bool:
         return self.current_position and signal == "CLOSE"

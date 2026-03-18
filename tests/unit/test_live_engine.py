@@ -1,6 +1,7 @@
 """
-Unit tests for LiveEngine error handling.
-Covers CRITICAL-5: transient errors should fallback, auth errors should propagate.
+Unit tests for LiveEngine error handling and equity calculation.
+Covers CRITICAL-5 (transient/fatal error classification) and
+MEDIUM-8 (equity must convert balances to quote currency via ticker).
 """
 
 from unittest.mock import AsyncMock
@@ -16,6 +17,7 @@ from utils.dataclass import OrderStatus
 def mock_connector():
     connector = AsyncMock()
     connector.close = AsyncMock()
+    connector.fetch_ticker = AsyncMock()
     return connector
 
 
@@ -107,3 +109,74 @@ class TestSyncPortfolioErrorHandling:
         mock_connector.fetch_balance.side_effect = ccxt.ExchangeNotAvailable("maintenance")
         portfolio = await engine.sync_portfolio()
         assert portfolio.total_equity == 9000.0
+
+
+class TestEquityCalculation:
+    """MEDIUM-8: equity must convert non-quote balances via ticker prices."""
+
+    @pytest.mark.asyncio
+    async def test_quote_only_balance_no_ticker_call(self, engine, mock_connector):
+        """If the only currency is the quote, no ticker fetch is needed."""
+        mock_connector.fetch_balance.return_value = {
+            "total": {"USDC": 5000.0}, "free": {"USDC": 5000.0}, "used": {},
+        }
+        portfolio = await engine.sync_portfolio()
+        assert portfolio.total_equity == 5000.0
+        mock_connector.fetch_ticker.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mixed_balances_converted_via_ticker(self, engine, mock_connector):
+        """BTC balance should be converted to USDC using BTC/USDC ticker."""
+        mock_connector.fetch_balance.return_value = {
+            "total": {"USDC": 2000.0, "BTC": 0.5},
+            "free": {"USDC": 2000.0, "BTC": 0.5},
+            "used": {},
+        }
+        mock_connector.fetch_ticker.return_value = {"last": 60000.0}
+        portfolio = await engine.sync_portfolio()
+        # 2000 USDC + 0.5 BTC * 60000 = 32000
+        assert portfolio.total_equity == 32000.0
+        mock_connector.fetch_ticker.assert_called_once_with("BTC/USDC")
+
+    @pytest.mark.asyncio
+    async def test_multiple_non_quote_currencies(self, engine, mock_connector):
+        """Multiple non-quote currencies each get a ticker lookup."""
+        mock_connector.fetch_balance.return_value = {
+            "total": {"USDC": 1000.0, "BTC": 0.1, "ETH": 2.0},
+            "free": {"USDC": 1000.0, "BTC": 0.1, "ETH": 2.0},
+            "used": {},
+        }
+
+        async def mock_ticker(symbol):
+            tickers = {"BTC/USDC": {"last": 50000.0}, "ETH/USDC": {"last": 3000.0}}
+            return tickers[symbol]
+
+        mock_connector.fetch_ticker.side_effect = mock_ticker
+        portfolio = await engine.sync_portfolio()
+        # 1000 + 0.1*50000 + 2.0*3000 = 1000 + 5000 + 6000 = 12000
+        assert portfolio.total_equity == 12000.0
+
+    @pytest.mark.asyncio
+    async def test_ticker_failure_skips_currency(self, engine, mock_connector):
+        """If ticker fetch fails for a currency, skip it (log warning)."""
+        mock_connector.fetch_balance.return_value = {
+            "total": {"USDC": 3000.0, "BTC": 0.5},
+            "free": {"USDC": 3000.0, "BTC": 0.5},
+            "used": {},
+        }
+        mock_connector.fetch_ticker.side_effect = ccxt.ExchangeError("no pair")
+        portfolio = await engine.sync_portfolio()
+        # BTC skipped, only USDC counted
+        assert portfolio.total_equity == 3000.0
+
+    @pytest.mark.asyncio
+    async def test_zero_balance_skipped(self, engine, mock_connector):
+        """Zero-amount currencies should not trigger ticker fetches."""
+        mock_connector.fetch_balance.return_value = {
+            "total": {"USDC": 1000.0, "BTC": 0.0},
+            "free": {"USDC": 1000.0},
+            "used": {},
+        }
+        portfolio = await engine.sync_portfolio()
+        assert portfolio.total_equity == 1000.0
+        mock_connector.fetch_ticker.assert_not_called()
