@@ -18,7 +18,7 @@ _DEFAULT_OPTIONS = {
 class CCXTConnector(ExchangeConnector):
     """
     Generic CCXT adapter parameterized by exchange name.
-    Replaces the per-exchange BinanceConnector / CoinbaseConnector classes.
+    Supports any exchange registered in _EXCHANGE_CLASSES.
     """
 
     def __init__(self, exchange_name: str, sandbox: bool = False) -> None:

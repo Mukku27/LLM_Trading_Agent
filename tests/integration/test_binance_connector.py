@@ -1,5 +1,5 @@
 """
-Integration tests for BinanceConnector against the Binance testnet.
+Integration tests for CCXTConnector (binance) against the Binance testnet.
 
 These tests require:
   EXCHANGE_API_KEY and EXCHANGE_API_SECRET env vars pointing at Binance testnet credentials.
@@ -12,7 +12,7 @@ import os
 import pytest
 import pytest_asyncio
 
-from execution.connectors.binance import BinanceConnector
+from execution.connectors.ccxt_connector import CCXTConnector
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.skipif(
@@ -23,7 +23,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.skipif(
 
 @pytest_asyncio.fixture
 async def connector():
-    c = BinanceConnector(sandbox=True)
+    c = CCXTConnector(exchange_name="binance", sandbox=True)
     yield c
     await c.close()
 
