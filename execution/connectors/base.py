@@ -33,5 +33,9 @@ class ExchangeConnector(ABC):
         ...
 
     @abstractmethod
+    async def fetch_ticker(self, symbol: str) -> dict:
+        ...
+
+    @abstractmethod
     async def close(self) -> None:
         ...

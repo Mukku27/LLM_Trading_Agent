@@ -57,5 +57,8 @@ class BinanceConnector(ExchangeConnector):
     async def fetch_open_orders(self, symbol: Optional[str] = None) -> List[dict]:
         return await self.exchange.fetch_open_orders(symbol)
 
+    async def fetch_ticker(self, symbol: str) -> dict:
+        return await self.exchange.fetch_ticker(symbol)
+
     async def close(self) -> None:
         await self.exchange.close()
